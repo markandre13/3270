@@ -14,15 +14,19 @@
 #include <string>
 #include <map>
 
+#include <openssl/ssl.h>
+
 #include "3270.hh"
 
 using namespace std;
 
 void hexdump(const char * buffer, size_t n);
-void write_some_3270_stuff(int fd);
+void write_some_3270_stuff();
+
+// FIXME: handle SIGCHLD with waitpid
 
 // FIXME: data is the wrong approach. collect the string until EOR, then handle it
-void data(int fd, char *ptr, size_t len);
+void data(char *ptr, size_t len);
 
 // FIXME: only work in EOR & BINARY & 3270 mode if they are really negotiated
 
@@ -35,7 +39,30 @@ unsigned verbose = 0;
 
 sockaddr_in local;
 
-void telnet(int fd);
+void telnet();
+
+SSL_CTX *ctx = 0;
+SSL *ssl = 0;
+int fd = -1;
+
+ssize_t
+tn_read(void *buf, size_t n)
+{
+  if (ssl)
+    return SSL_read(ssl, buf, n);
+  return read(fd, buf, n);
+}
+
+ssize_t
+tn_write(const void *buf, size_t n)
+{
+  if (ssl) {
+    printf("do SSL write\n");
+    return SSL_write(ssl, buf, n);
+  }
+  printf("do PLAIN write\n");
+  return write(fd, buf, n);
+}
 
 int
 main()
@@ -44,21 +71,21 @@ main()
   local.sin_addr.s_addr  = htonl(INADDR_ANY);
   local.sin_port         = htons(2323);
 
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd==-1) {
+  int server = socket(AF_INET, SOCK_STREAM, 0);
+  if (server==-1) {
     perror("socket tcp");
     exit(EXIT_FAILURE);
   }
   
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int) );
+  setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int) );
   
-  if (bind(fd, (sockaddr*) &local, sizeof(sockaddr_in)) < 0) {
+  if (bind(server, (sockaddr*) &local, sizeof(sockaddr_in)) < 0) {
     perror("bind tcp");
     fprintf(stderr, "port = %d\n", ntohs(local.sin_port));
     exit(EXIT_FAILURE);
   }
   
-  if (listen(fd, 20)<0) {
+  if (listen(server, 20)<0) {
     perror("listen tcp");
     exit(EXIT_FAILURE);
   }
@@ -68,7 +95,7 @@ main()
   while(true) {  
     sockaddr_in client;
     socklen_t len = sizeof(client);
-    int fd0 = accept(fd, (struct sockaddr *)&client, &len);
+    int fd0 = accept(server, (struct sockaddr *)&client, &len);
     
     struct hostent *hp = gethostbyaddr(&client.sin_addr, len, client.sin_family);
 
@@ -84,8 +111,9 @@ main()
     }
     
     if (pid==0) {
-      close(fd);
-      telnet(fd0);
+      close(server);
+      fd = fd0;
+      telnet();
       exit(0);
     }
     close(fd0);
@@ -146,7 +174,7 @@ main()
 // RFC 2946
 #define TNO_ENCRYPTION		38
 // RFC 1572
-#define TNO_NEW_ENVIRONMENT	39
+// #define TNO_NEW_ENVIRONMENT	39
 #define TNO_TN3270E		40
 #define TNO_START_TLS		46
 
@@ -157,8 +185,35 @@ main()
 #define TN3270E_OP_SEND 8
 #define TN3270E_OP_DEVICE_TYPE          2
 
+const char*
+option2str(unsigned option)
+{
+  static char buffer[64];
+  switch(option) {
+    case TNO_BINARY: 		return "BINARY";
+    case TNO_ECHO:		return "ECHO";
+    case TNO_STATUS:		return "STATUS";
+    case TNO_TERMINAL_TYPE:	return "TERMINAL-TYPE";
+    case TNO_EOR:		return "EOR";
+    case TNO_3270REGIME:	return "3270-REGIME";
+    case TNO_NAWS:		return "NAWS";
+    case TNO_TERMINAL_SPEED:	return "TERMINAL-SPEED";
+    case TNO_REMOTE_FLOW_CONTROL: return "REMOTE-FLOW-CONTROL";
+    case TNO_LINEMODE:		return "LINE-MODE";
+    case TNO_AUTHENTICATION:	return "AUTHENTICATION";
+    case TNO_ENCRYPTION:	return "ENCRYPTION";
+//    case TNO_NEW_ENVIRONMENT:	return "NEW-ENVIRONMENT";
+    case TNO_TN3270E:		return "TN3270E ";
+    case TNO_START_TLS:		return "START-TLS";
+  }
+  snprintf(buffer, sizeof(buffer), "OPTION-%u", option);
+  return buffer;
+}
+
 enum tn_state_code {
   TN_STATE_INIT,
+  TN_STATE_DO_START_TLS,
+  TN_STATE_WILL_START_TLS,
   TN_STATE_DO_TN3270E,
   TN_STATE_DO_3270REGIME,
   TN_STATE_DO_TERMINAL_TYPE,
@@ -180,17 +235,99 @@ struct tn_state {
 };
 
 void
-tn_handle(int fd, tn_state &state)
+tn_handle(tn_state &state)
 {
   switch(state.state) {
     case TN_STATE_INIT: {
-//      static const char msg[] = { TN_IAC, TN_DO, TNO_TN3270E };
-//      printf("send: IAC DO TN3270E\n");
+#if 0
+      static const char msg[] = { TN_IAC, TN_DO, TNO_TN3270E };
+      printf("send: IAC DO TN3270E\n");
+      state.state = TN_STATE_DO_TN3270E;
+#endif
+#if 0
 static const char msg[] = { TN_IAC, TN_DO, TNO_TERMINAL_TYPE };
 printf("send: IAC DO TERMINAL-TYPE\n");
 state.state = TN_STATE_DO_TERMINAL_TYPE;
-      write(fd, msg, sizeof(msg));
-//      state.state = TN_STATE_DO_TN3270E;
+#endif
+#if 1
+static const char msg[] = { TN_IAC, TN_DO, TNO_START_TLS };
+printf("send: IAC DO START-TLS\n");
+state.state = TN_STATE_DO_START_TLS;
+#endif
+      tn_write(msg, sizeof(msg));
+    } break;
+    case TN_STATE_DO_START_TLS: {
+      if (state.option != TNO_START_TLS) {
+        printf("error: expected START-TLS\n");
+        exit(1);
+      }
+      switch(state.cmd) {
+        case TN_WILL:
+//          static const char msg[] = { TN_IAC, TN_WILL, TNO_START_TLS };
+//          printf("send: IAC WILL START_TLS\n");
+            static const char msg[] = { TN_IAC, TN_SB, TNO_START_TLS, 1, TN_IAC, TN_SE };
+            printf("send: IAC SB START_TLS FOLLOWS IAC SE");
+            tn_write(msg, sizeof(msg));
+          state.state = TN_STATE_WILL_START_TLS;
+          break;
+        case TN_WONT: {
+          static const char msg[] = { TN_IAC, TN_DO, TNO_TERMINAL_TYPE };
+          printf("send: IAC DO TERMINAL-TYPE\n");
+          state.state = TN_STATE_DO_TERMINAL_TYPE;
+          tn_write(msg, sizeof(msg));
+        } break;
+      }
+    } break;
+    case TN_STATE_WILL_START_TLS: {
+      if (state.cmd!=TN_SB || state.option != TNO_START_TLS) {
+        printf("error: expected IAC SB START-TLS\n");
+        exit(1);
+      }
+      if (state.data.size()==1 && state.data[0]==1) {
+        printf("FOLLOWS\n");
+      } else {
+        printf("error, expected one octet for FOLLOWS\n");
+        exit(1);
+      }
+
+      printf("starting TLS...\n");
+
+      SSL_library_init();
+      ctx = SSL_CTX_new(SSLv23_server_method()); // SSLv2, SSLv3 & TLSv1
+      if (!ctx) {
+        printf("error: failed to create SSL context\n");
+        exit(1);
+      }
+      if (!SSL_CTX_use_certificate_chain_file(ctx, "certificate.pem")) {
+        printf("failed to load certificate chain\n");
+        exit(1);
+      }
+      if (!SSL_CTX_use_PrivateKey_file(ctx, "private.pem", SSL_FILETYPE_PEM)) {
+        printf("failed to load private key\n");
+        exit(1);
+      }
+      if (!SSL_CTX_check_private_key(ctx)) {
+        printf("error: certificate and private key do not match\n");
+        exit(1);
+      }
+
+      ssl = SSL_new(ctx);
+      if (!ssl) {
+        printf("error: failed to create SSL\n");
+        exit(1);
+      }
+      SSL_set_fd(ssl, fd);
+      if (!SSL_accept(ssl)) {
+        printf("error: handshake with client failed\n");
+        exit(1);
+      }
+
+      static const char msg[] = { TN_IAC, TN_DO, TNO_TERMINAL_TYPE };
+      printf("send: IAC DO TERMINAL-TYPE\n");
+      state.state = TN_STATE_DO_TERMINAL_TYPE;
+      tn_write(msg, sizeof(msg));
+      printf("send it\n");
+
     } break;
     case TN_STATE_DO_TN3270E: {
       if (state.option != TNO_TN3270E) {
@@ -203,7 +340,7 @@ state.state = TN_STATE_DO_TERMINAL_TYPE;
         case TN_WONT: {
            static const char msg[] = { TN_IAC, TN_DO, TNO_3270REGIME };
            printf("send: IAC DO 3270-REGIME\n");
-           write(fd, msg, sizeof(msg));
+           tn_write(msg, sizeof(msg));
            state.state = TN_STATE_DO_3270REGIME;
         } break;
       }
@@ -219,7 +356,7 @@ state.state = TN_STATE_DO_TERMINAL_TYPE;
         case TN_WONT: {
            static const char msg[] = { TN_IAC, TN_DO, TNO_TERMINAL_TYPE };
            printf("send: IAC DO TERMINAL-TYPE\n");
-           write(fd, msg, sizeof(msg));
+           tn_write(msg, sizeof(msg));
            state.state = TN_STATE_DO_TERMINAL_TYPE;
         } break;
       }
@@ -232,7 +369,7 @@ state.state = TN_STATE_DO_TERMINAL_TYPE;
       switch(state.cmd) {
         case TN_WILL:
           static const char msg[] = { TN_IAC, TN_SB, TNO_TERMINAL_TYPE, TNS_SEND, TN_IAC, TN_SE };
-          write(fd, msg, sizeof(msg));
+          tn_write(msg, sizeof(msg));
           printf("send: IAC SB TERMINAL-TYPE SEND IAC SE\n");
           state.state = TN_STATE_TERMINAL_TYPE_SEND;
           break;
@@ -259,19 +396,19 @@ state.state = TN_STATE_DO_TERMINAL_TYPE;
       if (state.data.find("IBM-327")==string::npos) {
         if (state.terminal_type == state.data) {
           const char msg[] = "ABORT: IBM 3270 COMPATIBLE TERMINAL REQUIRED.\n";
-          write(fd, msg, sizeof(msg));
+          tn_write(msg, sizeof(msg));
           fwrite(msg, sizeof(msg), 1, stdout);
           exit(0);
         }
         state.terminal_type = state.data;
         static const char msg[] = { TN_IAC, TN_SB, TNO_TERMINAL_TYPE, TNS_SEND, TN_IAC, TN_SE };
-        write(fd, msg, sizeof(msg));
+        tn_write(msg, sizeof(msg));
         printf("send: IAC SB TERMINAL-TYPE SEND IAC SE\n");
       } else {
         state.terminal_type = state.data;
         static const char msg[] = { TN_IAC, TN_DO, TNO_EOR };
         printf("send: IAC DO EOR\n");
-        write(fd, msg, sizeof(msg));
+        tn_write(msg, sizeof(msg));
         state.state = TN_STATE_DO_EOR;
       }
     } break;
@@ -282,7 +419,7 @@ state.state = TN_STATE_DO_TERMINAL_TYPE;
         exit(1);
       }
       static const char msg[] = { TN_IAC, TN_WILL, TNO_EOR };
-      write(fd, msg, sizeof(msg));
+      tn_write(msg, sizeof(msg));
       printf("send: IAC WILL EOR\n");
       state.state = TN_STATE_WILL_EOR;
     } break;
@@ -292,7 +429,7 @@ state.state = TN_STATE_DO_TERMINAL_TYPE;
         exit(1);
       }
       static const char msg[] = { TN_IAC, TN_DO, TNO_BINARY };
-      write(fd, msg, sizeof(msg));
+      tn_write(msg, sizeof(msg));
       printf("send: IAC DO BINARY\n");
       state.state = TN_STATE_DO_BINARY;
     } break;
@@ -303,36 +440,36 @@ state.state = TN_STATE_DO_TERMINAL_TYPE;
         exit(1);
       }
       static const char msg[] = { TN_IAC, TN_WILL, TNO_BINARY };
-      write(fd, msg, sizeof(msg));
+      tn_write(msg, sizeof(msg));
       printf("send: IAC WILL BINARY\n");
       state.state = TN_STATE_WILL_BINARY;
     } break;
     case TN_STATE_WILL_BINARY: {
 #if 0
       static const char msg[] = { TN_IAC, TN_SB, TNO_TERMINAL_TYPE, TNS_SEND, TN_IAC, TN_SE };
-      write(fd, msg, sizeof(msg));
+      tn_write(msg, sizeof(msg));
       printf("send: IAC SB TERMINAL-TYPE SEND IAC SE\n");
       state.state = TN_STATE_TERMINAL_TYPE_SEND;
 #else
-      write_some_3270_stuff(fd);
+      write_some_3270_stuff();
 #endif
     } break;
   }
 }
 
 void
-telnet(int fd)
+telnet()
 {
   char buffer[8192];
   
   string terminal_type;
   tn_state tn_state;
   tn_state.state = TN_STATE_INIT;
-  tn_handle(fd, tn_state);
+  tn_handle(tn_state);
   
   unsigned state = 0;
   while(true) {
-    ssize_t n = read(fd, buffer, sizeof(buffer));
+    ssize_t n = tn_read(buffer, sizeof(buffer));
 //    printf("got %zi octets: \n", n);
     if (n<0) {
       perror("read");
@@ -359,7 +496,7 @@ telnet(int fd)
         case 1: // !IAC ...
           switch(c) {
             case TN_IAC:
-              data(fd, buffer+left, i);
+              data(buffer+left, i);
               state = 2;
               break;
             default:
@@ -367,42 +504,43 @@ telnet(int fd)
           }
           break;
         case 2: // IAC ...
+          printf("rcvd: IAC ");
           switch(c) {
             case 0xff:
-              data(fd, buffer+i, 1);
+              data(buffer+i, 1);
               state = 0;
               break;
             case TN_SE:
-              printf("IAC SE ");
+              printf("SE ");
               state = 10;
               break;
             case TN_SB:
-              printf("IAC SB ");
+              printf("SB ");
               tn_state.cmd = c;
               state = 4;
               break;
             case TN_WILL:
-              printf("IAC WILL ");
+              printf("WILL ");
               tn_state.cmd = c;
               state = 3;
               break;
             case TN_WONT:
-              printf("IAC WONT ");
+              printf("WONT ");
               tn_state.cmd = c;
               state = 3;
               break;
             case TN_DO:
-              printf("IAC DO ");
+              printf("DO ");
               tn_state.cmd = c;
               state = 3;
               break;
             case TN_DONT:
-              printf("IAC DONT ");
+              printf("DONT ");
               tn_state.cmd = c;
               state = 3;
               break;
             case TN_EOR:
-              printf("IAC EOR\n");
+              printf("EOR\n");
               state = 0;
               break;
             default:
@@ -410,26 +548,19 @@ telnet(int fd)
           }
           break;
         case 3: // IAC (WILL|WONT|DO|DONT) ...
+          printf("%s ", option2str(c));
           switch(c) {
             case TNO_TN3270E:
-              printf("TN3270E ");
-              break;
             case TNO_3270REGIME:
-              printf("3270REGIME ");
-              break;
             case TNO_TERMINAL_TYPE:
-              printf("TERMINAL-TYPE ");
-              break;
             case TNO_EOR:
-              printf("EOR ");
-              break;
             case TNO_BINARY:
-              printf("BINARY ");
+            case TNO_START_TLS:
               break;
             default: {
-              printf("unhandled option %u: send IAC WONT %u\n", (unsigned)c, (unsigned)c);
+              printf("unhandled option: send IAC WONT %s\n", option2str(c));
               char msg[] = { TN_IAC, TN_WONT, c };
-              write(fd, msg, sizeof(msg));
+              tn_write(msg, sizeof(msg));
               state = 0;
             }
           }
@@ -437,30 +568,11 @@ telnet(int fd)
             state = 0;
             printf("\n");
             tn_state.option = c;
-            tn_handle(fd, tn_state);
+            tn_handle(tn_state);
           }
           break;
         case 4: // IAC SB ...
-          switch(c) {
-            case TNO_TN3270E:
-              printf("TN3270E");
-              break;
-            case TNO_3270REGIME:
-              printf("3270REGIME");
-              break;
-            case TNO_TERMINAL_TYPE:
-              printf("TERMINAL-TYPE");
-              break;
-            case TNO_EOR:
-              printf("EOR");
-              break;
-            case TNO_BINARY:
-              printf("BINARY");
-              break;
-            default:
-              printf("unhandled option %u\n", (unsigned) c);
-              exit(0);
-          }
+          printf("%s ", option2str(c));
           tn_state.option = c;
           state = 5;
           tn_state.data.clear();
@@ -482,7 +594,7 @@ telnet(int fd)
         case 6: // IAC SB option ... IAC
           switch(c) {
             case TN_SE:
-              tn_handle(fd, tn_state);
+              tn_handle(tn_state);
               state = 0;
               break;
             case TN_IAC:
@@ -501,7 +613,7 @@ telnet(int fd)
 }
 
 void
-write_some_3270_stuff(int fd)
+write_some_3270_stuff()
 {
 #if 0
       char buffer[1922];
@@ -550,7 +662,7 @@ write_some_3270_stuff(int fd)
         }
       }
        
-      out.write(fd);
+      out.write();
 }
 #endif
 
@@ -638,7 +750,7 @@ write_some_3270_stuff(int fd)
       out.endField();
       out.text("]");
 
-      out.write(fd);
+      out.write();
       return;
 }
 
@@ -655,26 +767,26 @@ exit(0);
       out.createPartition(1,
                       5,5,5,5,
                       10,10,10,10);
-      out.write(fd);
+      out.write();
       }
 
       {
       Out3270 out;
       out.activatePartition(1);
-      out.write(fd);
+      out.write();
       }
       
       {
       Out3270 out;                
       out.text("hallodu   was  ist  los?");
 
-      out.write(fd);
+      out.write();
       }
 #endif
 }
 
 void
-data(int fd, char *ptr, size_t len)
+data(char *ptr, size_t len)
 {
   printf("got data from client\n");
   hexdump(ptr, len);
@@ -708,5 +820,5 @@ data(int fd, char *ptr, size_t len)
   else
     out.text("LOGIN ERROR: WRONG ID OR PASSWD");
 
-  out.write(fd);
+  out.write();
 }

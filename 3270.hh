@@ -2,8 +2,6 @@
 
 using namespace std;
 
-extern unsigned verbose;
-
 static const unsigned WCC_RESET = 64;		// bit 1: reset partitions
 // bit 2: for printers
 // bit 3: for printers
@@ -199,7 +197,7 @@ class Out3270 {
       data[0] = CMD_EAU;
     }
     void text(const string &s);
-    void write(int fd);
+    void write();
 
 
     void startField();

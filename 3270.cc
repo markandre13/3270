@@ -1,6 +1,7 @@
 #include <map>
 #include <cassert>
 
+#include "telnet.hh"
 #include "3270.hh"
 
 using namespace std;
@@ -323,14 +324,14 @@ Out3270::insertCursor()
 }
 
 void
-Out3270::write(int fd)
+Out3270::write()
 {
   // fixme: escape 0xFF
 
   // append EOR
   data.append(1, 0xFF);
   data.append(1, 0xEF);
-  ::write(fd, data.c_str(), data.size());
+  tn_write(data.c_str(), data.size());
   
   if (verbose>0) {
     printf("send:\n");
