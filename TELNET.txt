@@ -1,0 +1,90 @@
+OS/360 (delayed)
+
+  OS/360 was big and took time to finish, so IBM created also
+    BOS/360, TOS/360 & DOS/360 (basic, tape, disk)
+
+TSS/360 (canceled)  
+
+CP-67 (experiment) -> VM/370 -> z/VM
+
+MFT (Multiprogramming with Fixed number of Tasks)
+  fixed size memory partition which has to be assigned for each app
+MVT (Multiprogramming with Variable number of Tasks)
+
+MVS (1974)
+ MVS/XA (1981), MVS/ESA (1985), OS/390 (1996) and currently z/OS (2001)
+ (multiple virtual storage: virtual memory)
+
+
+Job Control Language (JCL)
+  language to start batch jobs, among them TSO
+Time Sharing Option (TSO)
+  1971 as option for OS/MVT
+  1974 as part of MVS
+  provides a shell, text editor, etc. for OS/MVT, OS/390, z/OS, ...
+ISPF
+  TSO app for 3270 terminals with menu, screen editor, file browser
+
+System/370 (1970, 4 times faster + virtual memory)
+------------------------------------------
+TN3270
+
+854 TELNET PROTOCOL SPECIFICATION
+855 TELNET OPTION SPECIFICATIONS
+856 TELNET BINARY TRANSMISSION
+857 TELNET ECHO OPTION
+858 TELNET SUPPRESS GO AHEAD OPTION
+859 TELNET STATUS OPTION
+860 TELNET TIMING MARK OPTION
+861 TELNET EXTENDED OPTIONS - LIST OPTION
+885 TELNET END OF RECORD OPTION
+1041
+1091 Telnet Terminal-Type Option
+1647 TN3270 ENHANCEMENTS
+
+IAC WILL END-OF-RECORD
+  request/confirmation to start using EOR (239)
+IAC WON'T END-OF-RECORD
+
+
+IAC 255
+  
+
+RFC 1576
+
+  TN3270 uses the telnet options
+    BINARY		0
+    TERMINAL-TYPE	24 (0x18)
+    EOR			25 (RFC 885: TELNET END OF RECORD OPTION)
+
+    3270-REGIME
+    SUPPRESS-GO-AHEAD
+    ECHO
+    TIMING-MARK
+    
+  COMMANDS (RFC 854)
+    NOP
+    BREAK
+    Interrupt Process
+  
+    -2	24x80
+    -3	32x80
+    -4	43x80
+    -5	27x132
+    
+    -E extended data stream (structured fields)
+
+   The Binary option [3] is also required since 3270 data may contain
+   the FF (hexadecimal) or IAC character. When this character is
+   encountered during a TN3270 connection it is handled as per the
+   Binary RFC [3]. (RFC 856)
+            
+
+
+3278
+
+http://tn5250.sourceforge.net/
+
+3270
+
+3279
